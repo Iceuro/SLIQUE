@@ -1,17 +1,78 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-import numpy as np
-import os
 import random
 import shutil
 import torch
 import torch.distributed as dist
 import torch.autograd as autograd
+from modules.network import get_network
+from modules.CONTRIQUE_model import CONTRIQUE_model
+from modules.new_caption_img_model import CON_model
+from torchvision import transforms
+import numpy as np
+from tokenizer import SimpleTokenizer
+import os
+from PIL import Image
 
-from PIL import ImageFilter
+
+def img_feat(model, img_path):
+
+    image = Image.open(img_path).convert('RGB')
+    image1 = np.array(image)
+    if len(image1.shape) == 2:
+        return None
+
+    sz = image.size
+    image_2 = image.resize((sz[0] // 2, sz[1] // 2))
+
+    image = random_CerticalHorizon_flip(image)
+    image_2 = random_CerticalHorizon_flip(image_2)
+
+    image = transforms.ToTensor()(image).unsqueeze(0).cuda()
+    image_2 = transforms.ToTensor()(image_2).unsqueeze(0).cuda()
+
+    caption = 'a photo.'
+    tokenizer = SimpleTokenizer()
+    caption = tokenizer(caption).cuda(non_blocking=True)
+    caption = caption.unsqueeze(0)
+
+    with torch.no_grad():
+        _, _, _, _, model_feat, model_feat_2, _, _, _, _ = model(image, image_2, caption)
+
+    feat = np.hstack((model_feat.detach().cpu().numpy(),
+                      model_feat_2.detach().cpu().numpy()))
+
+    return feat
+
+
+def random_CerticalHorizon_flip(img):
+    # img = Image.open(img_path)
+    one_zero = [0, 1]
+    p = random.choice(one_zero)
+    p2 = random.choice(one_zero)
+    if p == one_zero[0] and p2 == 0:
+        p = 1
+
+    pF = transforms.RandomVerticalFlip(p=p2)
+    HF = transforms.RandomHorizontalFlip(p=p)  # p为概率，缺省时默认0.5
+    hf_image = HF(img)
+    hv_image = pF(hf_image)
+
+    return hv_image
+
+
+def load_SLIQUE_model(model_path):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    encoder = get_network('resnet50', pretrained=False)
+    n_features = encoder.fc.in_features  # get dimensions of fc layer
+    c_model = CONTRIQUE_model(None, encoder=encoder, n_features=n_features)
+    model = CON_model(embed_dim=512, vision_width=n_features, vision_model=encoder, context_length=77,
+                      vocab_size=49408,
+                      transformer_width=512, transformer_heads=8, transformer_layers=12, args=None,
+                      n_features=n_features,
+                      model=c_model)
+
+    model.load_state_dict(torch.load(model_path, map_location=device.type))
+    model = model.to(device)
+    return model
 
 
 def get_model(model):
